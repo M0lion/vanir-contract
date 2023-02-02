@@ -1,0 +1,14 @@
+{
+  "name": "vanir-contract",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "ganache --fork.network goerli",
+    "test": "truffle test"
+  },
+  "devDependencies": {
+    "ganache": "^7.7.3",
+    "truffle": "^5.7.4"
+  }
+}
