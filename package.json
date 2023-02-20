@@ -12,6 +12,6 @@
     "ethers": "^5.7.2",
     "fireblocks-defi-sdk": "^1.2.15",
     "ganache": "^7.7.3",
-    "truffle": "^5.7.4"
+    "truffle": "^5.7.7"
   }
 }

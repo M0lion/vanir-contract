@@ -1,69 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.18;
+pragma solidity 0.8.17;
 
-interface McdAddressProvider {
-  function getAddress(bytes32 _key) external view returns (address);
-}
-
-interface McdJoin {
-  function join(address urn, uint256 amt) external;
-  function dec() external view returns(uint256);
-  function exit(address guy, uint256 amt) external;
-}
-
-interface McdJoinDai {
-  function exit(address usr, uint256 wad) external;
-  function join(address urn, uint256 wad) external;
-}
-
-interface CdpManager {
-  function open(bytes32 ilk, address usr) external;
-  function frob(uint cdp, int dink, int dart) external;
-  function move(uint cdp, address dst, uint rad) external;
-  function last(address input) external view returns(uint256 cdp);
-  function urns(uint256 cdp) external view returns(address urn);
-  function flux(uint256 cdp, address dst, uint256 wad) external;
-}
-
-interface McdVat {
-    function ilks(bytes32 ilk) external view returns(uint256, uint256, uint256, uint256, uint256);
-    function hope(address usr) external;
-    function gem(bytes32 ilk, address urn) external view returns(uint256);
-    function dai(address urn) external view returns(uint256);
-    function urns(bytes32 ilk, address urn) external view returns(uint256 ink, uint256 art);
-}
-
-interface DaiToken {
-  function transfer(address dst, uint256 wad) external;
-  function transferFrom(address src, address dst, uint256 wad) external;
-  function approve(address guy, uint256 wad) external;
-  function decimals() external view returns(uint8);
-  function allowance(address from, address to) external view returns(uint256);
-  function balanceOf(address usr) external view returns(uint256);
-}
-
-interface WEthToken {
-  function transfer(address dst, uint256 amt) external;
-  function transferFrom(address src, address dst, uint256 wad) external;
-  function approve(address guy, uint256 wad) external;
-  function decimals() external view returns(uint8);
-  function allowance(address from, address to) external view returns(uint256);
-  function balanceOf(address usr) external view returns(uint256);
-  function deposit() external payable;
-}
-
-interface Token {
-  function transfer(address dst, uint256 amt) external;
-  function transferFrom(address src, address dst, uint256 wad) external;
-  function approve(address guy, uint256 wad) external;
-  function decimals() external view returns(uint8);
-  function allowance(address from, address to) external view returns(uint256);
-  function balanceOf(address usr) external view returns(uint256);
-}
-
-interface McdJug {
-  function drip(bytes32 ilk) external;
-}
+import "./Interfaces.sol";
 
 contract Vanir {
   uint8 public constant decimals = 18; // Should probably not be smaller than wei (18), as we will lose data when converting msg.value
@@ -81,10 +19,8 @@ contract Vanir {
   bytes32 private constant wEthTokenKey = "ETH";
 
   struct Loan {
-    uint256 cdp;
     bytes32 ilk;
     bytes32 joinKey;
-    bytes32 tokenKey;
     uint ink;
     uint art;
   }
@@ -99,25 +35,35 @@ contract Vanir {
 
   McdAddressProvider public mcdAddressProvider;
 
-  mapping(address => Loan) public loans;
+	mapping(address => uint256[]) public userLoans;
+  mapping(address => mapping(uint256 => Loan)) public loans;
+
+	address private owner;
 
   constructor(address mcdAddressProviderAddress) {
     mcdAddressProvider = McdAddressProvider(mcdAddressProviderAddress);
+		owner = msg.sender;
   }
+
+	receive() external payable {}
+
+	function withdraw(uint256 amount) public {
+		require(msg.sender == owner, "not allowed");
+		payable(owner).transfer(amount);
+	}
 
   error UintError(uint256);
 
-  function openLoanETH(bytes32 ilkKey, bytes32 joinKey, address usr, uint daiAmount) public payable {
-    require(loans[usr].cdp == 0, "vanir/sender already has a loan");
-
-    CdpManager manager = CdpManager(mcdAddressProvider.getAddress(cdpManagerKey));
+  function openLoanETH(bytes32 ilkKey, bytes32 joinKey, uint daiAmount) public payable {
+    McdCdpManager manager = McdCdpManager(mcdAddressProvider.getAddress(cdpManagerKey));
     McdJoin join = McdJoin(mcdAddressProvider.getAddress(joinKey));
     McdJoinDai joinDai = McdJoinDai(mcdAddressProvider.getAddress(mcdJoinDaiKey));
     McdJug jug = McdJug(mcdAddressProvider.getAddress(mcdJugKey));
     McdVat vat = McdVat(mcdAddressProvider.getAddress(mcdVatKey));
     WEthToken wEth = WEthToken(mcdAddressProvider.getAddress(wEthTokenKey));
 
-    require(msg.value > 0, "Value is 0");
+    require(msg.value > 0, "vanir/value cannot be 0");
+		require(daiAmount > 0, "vanir/daiAmount cannot be 0");
 
     //Wrap ETH
     wEth.deposit{value:msg.value}();
@@ -146,11 +92,87 @@ contract Vanir {
     // Move dai out of vault
     manager.move(cdp, address(this), toPrecision(daiAmount, decimals, radDecimals));
     vat.hope(address(joinDai));
-    joinDai.exit(usr, toPrecision(daiAmount, decimals, wadDecimals));
+    joinDai.exit(msg.sender, toPrecision(daiAmount, decimals, wadDecimals));
 
     // store loan info
-    loans[usr] = Loan(cdp, ilkKey, joinKey, "", ink, art);
+		userLoans[msg.sender].push(cdp);
+    loans[msg.sender][cdp] = Loan(ilkKey, joinKey, ink, art);
   }
+
+	function last(address usr) public view returns (uint256) {
+		return userLoans[usr][userLoans[usr].length - 1];
+	}
+
+	function closeLoanEth(address payable usr, uint256 cdp) public {
+		Loan memory loan = loans[usr][cdp];
+		require(loan.art > 0, "vanir/loan does not exist");
+		require(loan.ink > 0, "vanir/loan does not exist");
+		require(msg.sender == usr, "vanir/can only close own loan");
+
+		// Get outstanding debt
+		uint256 outstandingDebt = getOutstandingDebt(usr, cdp);
+
+		// Make sure we have enough allowance
+		DaiToken dai = DaiToken(mcdAddressProvider.getAddress(mcdDaiTokenKey));
+		require(toPrecision(dai.allowance(usr, address(this)), dai.decimals(), decimals) >= outstandingDebt, "vanir/insufficient allowance");
+
+		// Transfer dai to self
+		dai.transferFrom(usr, address(this), outstandingDebt);
+
+		// Transfer dai to vault
+		McdJoinDai joinDai = McdJoinDai(mcdAddressProvider.getAddress(mcdJoinDaiKey));
+		McdCdpManager manager = McdCdpManager(mcdAddressProvider.getAddress(cdpManagerKey));
+		dai.approve(address(joinDai), outstandingDebt);
+		joinDai.join(manager.urns(cdp), outstandingDebt);
+
+		// Lock in dai and free up collateral
+		manager.frob(cdp, -int256(toPrecision(loan.ink, decimals, wadDecimals)), -int256(toPrecision(loan.art, decimals, wadDecimals)));
+
+		// Move collateral out of vault
+		manager.flux(cdp, address(this), toPrecision(loan.ink, decimals, wadDecimals));
+		McdJoin join = McdJoin(mcdAddressProvider.getAddress(loan.joinKey));
+		join.exit(address(this), toPrecision(loan.ink, decimals, join.dec()));
+
+		// Unwrap wEth and send back
+    WEthToken wEth = WEthToken(mcdAddressProvider.getAddress(wEthTokenKey));
+		wEth.withdraw(toPrecision(loan.ink, decimals, wEth.decimals()));
+		usr.transfer(toPrecision(loan.ink, decimals, wadDecimals));
+
+		// Clean up loan data
+		delete loans[usr][cdp];
+
+		// Remove loan from userLoans[usr]
+		bool found = false;
+		for(uint i = 0; i < userLoans[usr].length - 1; i++) {
+			if(userLoans[usr][i] == cdp) {
+				found = true;
+			}
+
+			if(found) {
+				userLoans[usr][i] = userLoans[usr][i + 1];
+			}
+		}
+
+		if(found) {
+			userLoans[usr].pop();
+		} else if (userLoans[usr][userLoans[usr].length - 1] == cdp) {
+			userLoans[usr].pop();
+		} else {
+			revert("vanir/Could not find loan");
+		}
+	}
+
+	function getOutstandingDebt(address usr, uint256 cdp) public view returns (uint256) {
+		Loan memory loan = loans[usr][cdp];
+		require(loan.art > 0, "vanir/loan does not exist");
+
+		McdVat vat = McdVat(mcdAddressProvider.getAddress(mcdVatKey));
+		(, uint256 rate, , , ) = vat.ilks(loan.ilk);
+
+		uint256 outstanding = loan.art * rate;
+
+		return toPrecision(outstanding, wadDecimals + rayDecimals, decimals) + 1;
+	}
 
   function toPrecision(uint256 number, uint256 from, uint256 to) private pure returns(uint256) {
     if(from == to) {
