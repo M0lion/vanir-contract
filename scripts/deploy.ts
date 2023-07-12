@@ -1,19 +1,20 @@
 import { ethers } from "hardhat";
+import walletInfo from "../wallet.json";
 
+const provider = new ethers.providers.AlchemyProvider(
+  "goerli",
+  "n40fvsyFIAYsF3hKHTUMcDFvGQe80Czp"
+);
+
+const wallet = new ethers.Wallet(walletInfo.privateKey, provider);
+
+const addressProvider = "0xdA0Ab1e0017DEbCd72Be8599041a2aa3bA7e740F";
 async function main() {
-  const currentTimestampInSeconds = Math.round(Date.now() / 1000);
-  const unlockTime = currentTimestampInSeconds + 60;
+  const Vanir = await ethers.getContractFactory("Vanir", wallet);
+  const vanir = await Vanir.deploy(addressProvider);
+  await vanir.deployed();
 
-  const lockedAmount = ethers.utils.parseEther("0.001");
-
-  const Lock = await ethers.getContractFactory("Lock");
-  const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
-
-  await lock.deployed();
-
-  console.log(
-    `Lock with ${ethers.utils.formatEther(lockedAmount)}ETH and unlock timestamp ${unlockTime} deployed to ${lock.address}`
-  );
+  console.log("Vanir deployed to:", vanir.address);
 }
 
 // We recommend this pattern to be able to use async/await everywhere

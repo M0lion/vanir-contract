@@ -21,15 +21,15 @@ contract Vanir {
 	struct Loan {
 	    bytes32 ilk;
     	bytes32 joinKey;
-	    uint ink;
-    	uint art;
+			uint256 cdp;
+			address urn;
 	}
   
 	struct Ilk {
-		uint256 Art;   // Total Normalised Debt     [wad]
-		uint256 rate;  // Accumulated Rates         [ray]
-		uint256 spot;  // Price with Safety Margin  [ray]
-		uint256 line;  // Debt Ceiling              [rad]
+			uint256 Art;   // Total Normalised Debt     [wad]
+			uint256 rate;  // Accumulated Rates         [ray]
+			uint256 spot;  // Price with Safety Margin  [ray]
+			uint256 line;  // Debt Ceiling              [rad]
     	uint256 dust;  // Urn Debt Floor            [rad]
 	}
 
@@ -48,31 +48,29 @@ contract Vanir {
 	address private owner;
 
 	constructor(address mcdAddressProviderAddress) {
-    mcdAddressProvider = McdAddressProvider(mcdAddressProviderAddress);
-		manager = McdCdpManager(mcdAddressProvider.getAddress(cdpManagerKey));
-		joinDai = McdJoinDai(mcdAddressProvider.getAddress(mcdJoinDaiKey));
-		vat = McdVat(mcdAddressProvider.getAddress(mcdVatKey));
-	  jug = McdJug(mcdAddressProvider.getAddress(mcdJugKey));
-	  wEth = WEthToken(mcdAddressProvider.getAddress(wEthTokenKey));
-		dai = DaiToken(mcdAddressProvider.getAddress(mcdDaiTokenKey));
+  		mcdAddressProvider = McdAddressProvider(mcdAddressProviderAddress);
+			manager = McdCdpManager(mcdAddressProvider.getAddress(cdpManagerKey));
+			joinDai = McdJoinDai(mcdAddressProvider.getAddress(mcdJoinDaiKey));
+			vat = McdVat(mcdAddressProvider.getAddress(mcdVatKey));
+	  	jug = McdJug(mcdAddressProvider.getAddress(mcdJugKey));
+	  	wEth = WEthToken(mcdAddressProvider.getAddress(wEthTokenKey));
+			dai = DaiToken(mcdAddressProvider.getAddress(mcdDaiTokenKey));
 
-		owner = msg.sender;
+			owner = msg.sender;
 	}
 
 	receive() external payable {}
 
 	function withdraw(uint256 amount) public {
-		require(msg.sender == owner, "not allowed");
-		payable(owner).transfer(amount);
+			require(msg.sender == owner, "not allowed");
+			payable(owner).transfer(amount);
 	}
-
-	error UintError(uint256);
 
 	function open(bytes32 ilkKey, bytes32 joinKey, uint daiAmount) public payable {
 	    McdJoin join = McdJoin(mcdAddressProvider.getAddress(joinKey));
 
 	    require(msg.value > 0, "vanir/value cannot be 0");
-		require(daiAmount > 0, "vanir/daiAmount cannot be 0");
+			require(daiAmount > 0, "vanir/daiAmount cannot be 0");
 
     	//Wrap ETH
 	    wEth.deposit{value:msg.value}();
@@ -93,19 +91,18 @@ contract Vanir {
     
     	// Transfer collateral to vault
 	    wEth.approve(address(join), toPrecision(msg.value, wadDecimals, wEth.decimals()));
+
     	join.join(manager.urns(cdp), toPrecision(ink, decimals, join.dec()));
 
 	    // Lock in wEth and generate dai
     	manager.frob(cdp, int(toPrecision(ink, decimals, wadDecimals)), int(toPrecision(art, decimals, wadDecimals)));
     
 	    // Move dai out of vault
-    	manager.move(cdp, address(this), toPrecision(daiAmount, decimals, radDecimals));
-	    vat.hope(address(joinDai));
-    	joinDai.exit(msg.sender, toPrecision(daiAmount, decimals, wadDecimals));
+			flushDai(cdp);
 
 	    // store loan info
-		userLoans[msg.sender].push(cdp);
-    	loans[msg.sender][cdp] = Loan(ilkKey, joinKey, ink, art);
+			userLoans[msg.sender].push(cdp);
+    	loans[msg.sender][cdp] = Loan(ilkKey, joinKey, cdp, manager.urns(cdp));
 	}
 
 	function last(address usr) public view returns (uint256) {
@@ -114,8 +111,7 @@ contract Vanir {
 
 	function close(address payable usr, uint256 cdp) public {
 		Loan memory loan = loans[usr][cdp];
-		require(loan.art > 0, "vanir/loan does not exist");
-		require(loan.ink > 0, "vanir/loan does not exist");
+		require(loan.urn != address(0), "vanir/loan does not exist");
 		require(msg.sender == usr, "vanir/can only close own loan");
 
 		// Get outstanding debt
@@ -131,17 +127,12 @@ contract Vanir {
 		dai.approve(address(joinDai), outstandingDebt);
 		joinDai.join(manager.urns(cdp), outstandingDebt);
 
+		(uint256 ink, uint256 art) = vat.urns(loan.ilk, loan.urn);
 		// Lock in dai and free up collateral
-		manager.frob(cdp, -int256(toPrecision(loan.ink, decimals, wadDecimals)), -int256(toPrecision(loan.art, decimals, wadDecimals)));
+		// TODO: Dont convert precision
+		manager.frob(cdp, -int256(toPrecision(ink, decimals, wadDecimals)), -int256(toPrecision(art, decimals, wadDecimals)));
 
-		// Move collateral out of vault
-		manager.flux(cdp, address(this), toPrecision(loan.ink, decimals, wadDecimals));
-		McdJoin join = McdJoin(mcdAddressProvider.getAddress(loan.joinKey));
-		join.exit(address(this), toPrecision(loan.ink, decimals, join.dec()));
-
-		// Unwrap wEth and send back
-		wEth.withdraw(toPrecision(loan.ink, decimals, wEth.decimals()));
-		usr.transfer(toPrecision(loan.ink, decimals, wadDecimals));
+		flushEth(loan);
 
 		// Clean up loan data
 		delete loans[usr][cdp];
@@ -169,35 +160,44 @@ contract Vanir {
 
 	function debt(address usr, uint256 cdp) public view returns (uint256) {
 		Loan memory loan = loans[usr][cdp];
-		require(loan.art > 0, "Vanir/loan does not exist");
+		require(loan.urn != address(0), "Vanir/loan does not exist");
 
 		(, uint256 rate, , , ) = vat.ilks(loan.ilk);
+		(, uint256 art) = vat.urns(loan.ilk, loan.urn);
 
-		uint256 outstanding = loan.art * rate;
+		uint256 outstanding = art * rate;
 
-		return toPrecision(outstanding, wadDecimals + rayDecimals, decimals);
+		return toPrecision(outstanding, wadDecimals + rayDecimals, decimals) + 1;
 	}
 
-	function frob(address payable usr, uint256 cdp, int256 dCol, int256 dDai) public payable {
+	function urn(address usr, uint256 cdp) public view returns (uint256 ink, uint256 art) {
+		Loan memory loan = loans[usr][cdp];
+		require(loan.urn != address(0), "Vanir/loan does not exist");
+
+		return vat.urns(loan.ilk, loan.urn);
+	}
+
+	function frob(address payable usr, uint256 cdp, int256 dCol, int256 dDebt) public payable {
+		require(msg.sender == usr, "Vanir/Can only frob own loan");
 
 		Loan memory loan = loans[usr][cdp];
 
-    	// Update rate, so we don't have to pay unneccesary interest
-	    jug.drip(loan.ilk);
+    // Update rate, so we don't have to pay unneccesary interest
+	  jug.drip(loan.ilk);
 
-	    McdJoin join = McdJoin(mcdAddressProvider.getAddress(loan.joinKey));
+	  McdJoin join = McdJoin(mcdAddressProvider.getAddress(loan.joinKey));
 
 		// Get rate
-	    (,uint256 rate,,,) = vat.ilks(loan.ilk);
+	  (,uint256 rate,,,) = vat.ilks(loan.ilk);
 
 		// Calcluate dArt (normalized debt, see open for more explanation)
-    	int256 dArt = ((dDai * int256(10 ** rayDecimals)) / int256(rate)) + 1;
+    int256 dArt = ((dDebt * int256(10 ** rayDecimals)) / int256(rate));
+
+		// Validate payment is correct
 
 		if (dCol > 0) {
-			// Prepare for depositing collateral
-
-			// Validate payment is correct
-			require(dCol == int256(msg.value), "Vanir/Paid amout doesn't match dCol");
+				require(dCol == int256(msg.value), "Vanir/Paid amout doesn't match dCol");
+				// Prepare for depositing collateral
 			
  		   	//Wrap ETH
 	    	wEth.deposit{value:uint256(dCol)}();
@@ -205,12 +205,14 @@ contract Vanir {
 	    	// Transfer collateral to vault
 	    	wEth.approve(address(join), toPrecision(uint256(dCol), wadDecimals, wEth.decimals()));
  		   	join.join(manager.urns(cdp), toPrecision(uint256(dCol), decimals, join.dec()));
-		} 
+		} else {
+			require(msg.value == 0, "Vanir/Can't pay ETH when not depositing collateral");
+		}
 
-		if (dDai < 0) {
+		if (dDebt < 0) {
 			// Prepare for depositing dai
 
-			uint256 amount = uint256(-dDai);
+			uint256 amount = uint256(-dDebt);
 
 			// Transfer dai to self
 			dai.transferFrom(usr, address(this), amount);
@@ -218,47 +220,50 @@ contract Vanir {
 			// Transfer dai to vault
 			dai.approve(address(joinDai), amount);
 			joinDai.join(manager.urns(cdp), amount);
-		} else if (dDai == 0){
+		} else if (dDebt > 0){
+			dArt += 1;
+		} else {
 			dArt = 0;
 		}
 
 		manager.frob(cdp, toPrecisionSigned(dCol, decimals, wadDecimals), toPrecisionSigned(dArt, decimals, wadDecimals));
 		
 		if (dCol < 0) {
-			// Finish withdrawing collateral
-			
-			uint256 amount = uint256(-dDai);
+			flushEth(loan);
+		}
+
+		if (dDebt > 0) {
+			flushDai(cdp);
+		}
+	}
+
+	function flushDai(uint256 cdp) private {
+		uint256 amount = vat.dai(manager.urns(cdp));
+		manager.move(cdp, address(this), amount);
+		vat.hope(address(joinDai));
+		joinDai.exit(msg.sender, toPrecision(amount, radDecimals, wadDecimals));
+	}
+
+	function flushEth(Loan memory loan) private {
+			uint256 amount = vat.gem(loan.ilk, loan.urn);
+
+	    McdJoin join = McdJoin(mcdAddressProvider.getAddress(loan.joinKey));
 
 			// Move collateral out of vault
-			manager.flux(cdp, address(this), toPrecision(amount, decimals, wadDecimals));
-			join.exit(address(this), toPrecision(amount, decimals, join.dec()));
+			manager.flux(loan.cdp, address(this), amount);
+			join.exit(address(this), toPrecision(amount, wadDecimals, join.dec()));
 
 			// Unwrap wEth and send back
 			wEth.withdraw(toPrecision(amount, decimals, wEth.decimals()));
-			usr.transfer(toPrecision(amount, decimals, wadDecimals));
-		}
-
-		if (dDai > 0) {
-			// Finish withdrawing dai
-
-	    	// Move dai out of vault
-	    	manager.move(cdp, address(this), toPrecision(uint256(dDai), decimals, radDecimals));
-		    vat.hope(address(joinDai));
-    		joinDai.exit(msg.sender, toPrecision(uint256(dDai), decimals, wadDecimals));
-		}
-
-		// Update loan info
-		(uint256 ink, uint256 art) = vat.urns(loan.ilk, manager.urns(cdp));
-    	loans[usr][cdp].ink  = ink;
-		loans[usr][cdp].art = art;
+			payable(msg.sender).transfer(toPrecision(amount, decimals, wadDecimals));
 	}
 
 	function toPrecision(uint256 number, uint256 from, uint256 to) private pure returns(uint256) {
-    	if(from == to) {
+    if(from == to) {
 			return number;
-	    }
+	  }
 
-    	if(from > to) {
+    if(from > to) {
 			return number / (10 ** (from - to));
 		}
 
@@ -270,11 +275,11 @@ contract Vanir {
 	}
 
 	function toPrecisionSigned(int256 number, uint256 from, uint256 to) private pure returns(int256) {
-    	if(from == to) {
+    if(from == to) {
 			return number;
-	    }
+	  }
 
-    	if(from > to) {
+    if(from > to) {
 			return number / int256(10 ** (from - to));
 		}
 

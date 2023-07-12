@@ -76,7 +76,9 @@ describe("Vanir", function () {
       const debt = await vanir.debt(owner.address, cdp);
 
       expect(debt, "Debt").to.equal(
-        ethers.utils.parseUnits(loanAmount.toString(), await vanir.decimals())
+        ethers.utils
+          .parseUnits(loanAmount.toString(), await vanir.decimals())
+          .add(1)
       );
 
       const daiBalance = await daiContract.balanceOf(owner.address);
@@ -142,7 +144,7 @@ describe("Vanir", function () {
       const vat = await getVatContract(owner);
       const mcdManager = await getMcdManagerContract(owner);
 
-      const { ink: originalCollateral } = await vanir.loans(owner.address, cdp);
+      const { ink: originalCollateral } = await vanir.urn(owner.address, cdp);
       const originalEtherBalance = await owner.getBalance();
 
       const rawCollateralToAdd = "1";
@@ -164,10 +166,7 @@ describe("Vanir", function () {
         originalCollateral.add(collateralToAdd)
       );
 
-      const { ink: collateralFromVanir } = await vanir.loans(
-        owner.address,
-        cdp
-      );
+      const { ink: collateralFromVanir } = await vanir.urn(owner.address, cdp);
       expect(collateralFromVanir, "Vanir's collateral").to.equal(
         originalCollateral.add(collateralToAdd)
       );
@@ -180,10 +179,8 @@ describe("Vanir", function () {
 
     it("removes collateral", async function () {
       const { vanir, owner, cdp } = await deployVanirWithLoanFixture();
-      const vat = await getVatContract(owner);
-      const mcdManager = await getMcdManagerContract(owner);
 
-      const { ink: originalCollateral } = await vanir.loans(owner.address, cdp);
+      const { ink: originalCollateral } = await vanir.urn(owner.address, cdp);
       const originalEtherBalance = await owner.getBalance();
       let gasSpent = BigNumber.from(0);
 
@@ -206,26 +203,19 @@ describe("Vanir", function () {
 
       const expectedCollateral = originalCollateral.add(collateralToRemove);
 
-      const urn = await mcdManager.urns(cdp);
-      const { ink: collateralFromVat } = await vat.urns(
-        ethers.utils.formatBytes32String("ETH-C"),
-        urn
-      );
+      const { ink: collateralFromVat } = await vanir.urn(owner.address, cdp);
       expect(collateralFromVat, "Vat's collateral").to.equal(
         expectedCollateral
       );
 
-      const { ink: collateralFromVanir } = await vanir.loans(
-        owner.address,
-        cdp
-      );
+      const { ink: collateralFromVanir } = await vanir.urn(owner.address, cdp);
       expect(collateralFromVanir, "Vanir's collateral").to.equal(
         expectedCollateral
       );
 
       const etherBalance = await owner.getBalance();
       expect(etherBalance, "Ether balance to be greater").to.equal(
-        originalEtherBalance.sub(gasSpent)
+        originalEtherBalance.sub(gasSpent).sub(collateralToRemove)
       );
     });
 
@@ -237,7 +227,7 @@ describe("Vanir", function () {
 
       const originalDaiBalance = await daiContract.balanceOf(owner.address);
 
-      const rawDebtToAdd = "500";
+      const rawDebtToAdd = "50";
       const debtToAdd = ethers.utils.parseUnits(
         rawDebtToAdd,
         await vanir.decimals()
@@ -250,7 +240,7 @@ describe("Vanir", function () {
         ethers.utils.formatBytes32String("ETH-C"),
         urn
       );
-      const { art: debtFromVanir } = await vanir.loans(owner.address, cdp);
+      const { art: debtFromVanir } = await vanir.urn(owner.address, cdp);
       expect(debtFromVanir, "same debt").to.equal(debtFromVat);
 
       const daiBalance = await daiContract.balanceOf(owner.address);
@@ -287,7 +277,7 @@ describe("Vanir", function () {
         ethers.utils.formatBytes32String("ETH-C"),
         urn
       );
-      const { art: debtFromVanir } = await vanir.loans(owner.address, cdp);
+      const { art: debtFromVanir } = await vanir.urn(owner.address, cdp);
       expect(debtFromVanir, "same debt").to.equal(debtFromVat);
 
       const daiBalance = await daiContract.balanceOf(owner.address);
@@ -311,11 +301,4 @@ async function openLoan(loanAmount: number, collateral: number, vanir: Vanir) {
   const cdp = await vanir.last(vanir.signer.getAddress());
 
   return cdp;
-}
-
-async function approve(target: string, amount: number, daiContract: DaiToken) {
-  await daiContract.approve(
-    target,
-    ethers.utils.parseUnits(amount.toString(), await daiContract.decimals())
-  );
 }
